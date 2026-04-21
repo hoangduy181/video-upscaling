@@ -44,12 +44,47 @@ else
   git clone https://github.com/ckkelvinchan/RealBasicVSR.git "$RB_DIR"
 fi
 
+# ── PyTorch (must come before mmcv-full so mim can detect torch+cuda version) ─
+if python -c "import torch" &>/dev/null 2>&1; then
+  TORCH_VER=$(python -c "import torch; print(torch.__version__)")
+  CUDA_VER=$(python -c "import torch; print(torch.version.cuda or 'cpu')")
+  info "PyTorch already installed: torch=$TORCH_VER  cuda=$CUDA_VER"
+else
+  warn "PyTorch not found — detecting CUDA version to choose the right wheel..."
+
+  # Detect CUDA from nvcc or nvidia-smi
+  if command -v nvcc &>/dev/null; then
+    CUDA_TAG=$(nvcc --version | grep -oP 'release \K[0-9]+\.[0-9]+' | tr -d '.')
+  elif command -v nvidia-smi &>/dev/null; then
+    CUDA_TAG=$(nvidia-smi | grep -oP 'CUDA Version: \K[0-9]+\.[0-9]+' | tr -d '.')
+  else
+    CUDA_TAG="cpu"
+  fi
+
+  info "Detected CUDA tag: $CUDA_TAG"
+
+  case "$CUDA_TAG" in
+    118|11.8)  TORCH_IDX="https://download.pytorch.org/whl/cu118" ;;
+    117|11.7)  TORCH_IDX="https://download.pytorch.org/whl/cu117" ;;
+    116|11.6)  TORCH_IDX="https://download.pytorch.org/whl/cu116" ;;
+    113|11.3)  TORCH_IDX="https://download.pytorch.org/whl/cu113" ;;
+    cpu)       TORCH_IDX="https://download.pytorch.org/whl/cpu"   ;;
+    *)
+      warn "Unknown CUDA tag '$CUDA_TAG' — defaulting to cu118."
+      TORCH_IDX="https://download.pytorch.org/whl/cu118"
+      ;;
+  esac
+
+  info "Installing PyTorch from $TORCH_IDX ..."
+  pip install torch torchvision --index-url "$TORCH_IDX"
+fi
+
 # ── Python dependencies ───────────────────────────────────────────────────────
 info "Installing openmim..."
 pip install openmim
 
 info "Installing mmcv-full (may take a few minutes on first run)..."
-# mim installs the version compatible with the detected torch build
+# mim reads the installed torch+cuda version to select the matching mmcv wheel
 mim install mmcv-full
 
 info "Installing mmedit..."

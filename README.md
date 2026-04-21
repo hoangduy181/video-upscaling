@@ -34,6 +34,13 @@ Output video (4× resolution, original fps & audio)
 
 ## Setup
 
+
+### 0. Environment
+```bash
+conda create -n enhancevideo python=3.8
+conda activate enhancevideo 
+conda install -c conda-forge ffmpeg
+```
 ### 1. Clone this repository
 
 ```bash
@@ -42,6 +49,8 @@ cd video-upscaling
 ```
 
 ### 2. Run the bootstrap script
+
+
 
 This script clones the official RealBasicVSR repo into `vendor/`, installs all Python dependencies, and tells you where to save the model checkpoint.
 
