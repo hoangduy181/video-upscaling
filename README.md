@@ -62,15 +62,20 @@ bash scripts/setup_realbasicvsr.sh
 
 ### 3. Download the pretrained checkpoint
 
-Save the checkpoint file to `checkpoints/RealBasicVSR_x4.pth`.  
-Download from any of these mirrors:
+Run the download script — it tries Dropbox first (no auth), then falls back to Google Drive via `gdown`:
+
+```bash
+bash scripts/download_weights.sh
+```
+
+Or download manually from any of these mirrors and save to `checkpoints/RealBasicVSR_x4.pth`:
 
 - [Dropbox](https://www.dropbox.com/s/eufigwhejgd8bnt/RealBasicVSR_x4.pth)
-- [Google Drive](https://drive.google.com/file/d/1OYR1J2GXE3-bCBkTa3eAiKFjqFD6/view)
+- [Google Drive](https://drive.google.com/file/d/1OYR1J2GXE3-bCBcIDBkTa3eAiKFjqFD6/view)
 - [OneDrive](https://entuedu-my.sharepoint.com/:u:/g/personal/chan0899_e_ntu_edu_sg/EVlhWlqBVuxOhjeSqLN9N4UBSbQ5Z-PvYFm2AO5kAGxJSg)
 
 ```bash
-# After downloading, verify the file exists:
+# Verify the file is in place:
 ls -lh checkpoints/RealBasicVSR_x4.pth
 ```
 

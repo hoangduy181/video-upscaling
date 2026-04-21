@@ -63,15 +63,18 @@ else
 
   info "Detected CUDA tag: $CUDA_TAG"
 
+  # Map system CUDA version to the closest PyTorch index that supports it.
+  # CUDA is backward-compatible: a system with CUDA 12.8 can run cu121 wheels.
   case "$CUDA_TAG" in
+    12*)       TORCH_IDX="https://download.pytorch.org/whl/cu121" ;;  # CUDA 12.x → cu121
     118|11.8)  TORCH_IDX="https://download.pytorch.org/whl/cu118" ;;
     117|11.7)  TORCH_IDX="https://download.pytorch.org/whl/cu117" ;;
     116|11.6)  TORCH_IDX="https://download.pytorch.org/whl/cu116" ;;
     113|11.3)  TORCH_IDX="https://download.pytorch.org/whl/cu113" ;;
     cpu)       TORCH_IDX="https://download.pytorch.org/whl/cpu"   ;;
     *)
-      warn "Unknown CUDA tag '$CUDA_TAG' — defaulting to cu118."
-      TORCH_IDX="https://download.pytorch.org/whl/cu118"
+      warn "Unknown CUDA tag '$CUDA_TAG' — defaulting to cu121."
+      TORCH_IDX="https://download.pytorch.org/whl/cu121"
       ;;
   esac
 
