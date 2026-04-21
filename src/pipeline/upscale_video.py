@@ -59,6 +59,9 @@ from config import (
     VENDOR_RB_DIR,
 )
 
+# Sentinel value used to trigger automatic max_seq_len detection
+_AUTO = "auto"
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -102,6 +105,52 @@ def probe_video(path: Path) -> dict:
         "duration": float(video_stream.get("duration", 0)),
         "has_audio": audio_stream is not None,
     }
+
+
+# ── Auto max_seq_len ──────────────────────────────────────────────────────────
+
+def auto_max_seq_len(width: int, height: int, device: str = "cuda:0") -> int:
+    """Estimate a safe max_seq_len from available VRAM and frame resolution.
+
+    Uses a conservative empirical formula:
+      VRAM per frame ≈ pixels × 3 channels × 4 bytes × 60× feature-map overhead
+
+    Leaves 1.5 GB headroom and clamps the result to [1, 120].
+    Falls back to 8 when torch is unavailable or the device is CPU.
+    """
+    try:
+        import torch  # noqa: PLC0415
+    except ImportError:
+        print("[auto] torch not importable here — defaulting to max_seq_len=8")
+        return 8
+
+    if device == "cpu" or not torch.cuda.is_available():
+        print("[auto] CPU mode — defaulting to max_seq_len=8")
+        return 8
+
+    gpu_idx = int(device.split(":")[1]) if ":" in device else 0
+    props = torch.cuda.get_device_properties(gpu_idx)
+    total_vram = props.total_memory          # bytes
+    used_vram  = torch.cuda.memory_allocated(gpu_idx)
+    free_vram  = total_vram - used_vram
+
+    headroom   = 1.5 * 1024 ** 3            # reserve 1.5 GB
+    usable     = max(0.0, free_vram - headroom)
+
+    # Empirical: each frame's VRAM cost during RealBasicVSR forward pass.
+    # Feature maps are ~60× the raw pixel bytes (mid_channels=64, 20 prop blocks).
+    bytes_per_frame = width * height * 3 * 4 * 60
+    if bytes_per_frame == 0:
+        return 30
+
+    estimated = max(1, min(120, int(usable / bytes_per_frame)))
+    total_gb   = total_vram / 1024 ** 3
+    free_gb    = free_vram  / 1024 ** 3
+    print(
+        f"[auto] VRAM: {total_gb:.1f} GB total, {free_gb:.1f} GB free → "
+        f"max_seq_len={estimated}"
+    )
+    return estimated
 
 
 # ── Preflight checks ──────────────────────────────────────────────────────────
@@ -193,36 +242,143 @@ def extract_frames(video: Path, frames_dir: Path, fps: float) -> int:
     return count
 
 
-def run_inference(
-    frames_dir: Path,
-    upscaled_dir: Path,
-    config: str,
-    checkpoint: str,
-    max_seq_len: int,
-) -> None:
-    """Call the RealBasicVSR inference script on the extracted frames."""
-    upscaled_dir.mkdir(parents=True, exist_ok=True)
-
-    # Build PYTHONPATH so realbasicvsr package inside the vendor dir is found
+def _build_inference_env(device: str) -> dict:
+    """Build the subprocess env with PYTHONPATH and CUDA_VISIBLE_DEVICES set."""
     env = os.environ.copy()
     existing_pp = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = (
         f"{VENDOR_RB_DIR}{os.pathsep}{existing_pp}" if existing_pp
         else str(VENDOR_RB_DIR)
     )
+    if device.startswith("cuda:"):
+        gpu_idx = device.split(":")[1]
+        env["CUDA_VISIBLE_DEVICES"] = gpu_idx
+        print(f"[inference] Using GPU {gpu_idx} (CUDA_VISIBLE_DEVICES={gpu_idx})")
+    elif device == "cpu":
+        env["CUDA_VISIBLE_DEVICES"] = ""
+        print("[inference] GPU disabled — running on CPU (slow)")
+    return env
 
+
+def _run_inference_chunk(
+    chunk_frames_dir: Path,
+    chunk_out_dir: Path,
+    config: str,
+    checkpoint: str,
+    env: dict,
+) -> None:
+    """Run the RealBasicVSR inference script on one chunk directory."""
+    chunk_out_dir.mkdir(parents=True, exist_ok=True)
     run([
         "python", str(INFERENCE_SCRIPT),
         config,
         checkpoint,
-        str(frames_dir),
-        str(upscaled_dir),
-        f"--max_seq_len={max_seq_len}",
+        str(chunk_frames_dir),
+        str(chunk_out_dir),
         "--is_save_as_png=True",
     ], env=env)
 
-    count = len(list(upscaled_dir.glob(FRAME_GLOB)))
-    print(f"[inference] {count} upscaled frames → {upscaled_dir}")
+
+def run_inference(
+    frames_dir: Path,
+    upscaled_dir: Path,
+    config: str,
+    checkpoint: str,
+    max_seq_len: int,
+    device: str = "cuda:0",
+    chunk_overlap: int = 0,
+) -> None:
+    """Call the RealBasicVSR inference script on the extracted frames.
+
+    When max_seq_len < total frames the video is processed in chunks.
+    chunk_overlap adds extra frames at each chunk boundary so the model
+    has temporal context across seams; the overlap frames are discarded
+    from the output so the final frame count stays correct.
+
+    Args:
+        frames_dir:    Directory of extracted source PNG frames.
+        upscaled_dir:  Directory to write upscaled PNG frames to.
+        config:        Path to the RealBasicVSR config file.
+        checkpoint:    Path to the model checkpoint.
+        max_seq_len:   Max frames per forward pass. Lower = less VRAM used.
+        device:        "cuda:0" / "cuda:1" / "cpu".
+        chunk_overlap: Extra frames borrowed from adjacent chunks at each
+                       boundary to preserve temporal context.
+                       Recommended: 2–5. 0 disables overlap (original behaviour).
+    """
+    upscaled_dir.mkdir(parents=True, exist_ok=True)
+    env = _build_inference_env(device)
+
+    all_frames = sorted(frames_dir.glob(FRAME_GLOB))
+    total = len(all_frames)
+
+    if total == 0:
+        raise RuntimeError(f"[inference] No frames found in {frames_dir}")
+
+    # If everything fits in one pass, skip chunking entirely
+    if total <= max_seq_len:
+        print(f"[inference] Single pass ({total} frames ≤ max_seq_len={max_seq_len})")
+        _run_inference_chunk(frames_dir, upscaled_dir, config, checkpoint, env)
+        count = len(list(upscaled_dir.glob(FRAME_GLOB)))
+        print(f"[inference] {count} upscaled frames → {upscaled_dir}")
+        return
+
+    # ── Chunked inference with optional overlap ────────────────────────────────
+    chunk_starts = list(range(0, total, max_seq_len))
+    print(
+        f"[inference] {total} frames → {len(chunk_starts)} chunks "
+        f"(max_seq_len={max_seq_len}, overlap={chunk_overlap})"
+    )
+
+    tmp_chunks_root = upscaled_dir.parent / "chunk_tmp"
+    tmp_chunks_root.mkdir(parents=True, exist_ok=True)
+
+    output_idx = 0  # global counter for output filenames
+
+    try:
+        for chunk_n, start in enumerate(chunk_starts):
+            end = min(start + max_seq_len, total)
+
+            # Expand window with overlap (clamped to valid frame range)
+            lo = max(0, start - chunk_overlap)
+            hi = min(total, end + chunk_overlap)
+            window_frames = all_frames[lo:hi]
+
+            chunk_in_dir  = tmp_chunks_root / f"chunk_{chunk_n:04d}_in"
+            chunk_out_dir = tmp_chunks_root / f"chunk_{chunk_n:04d}_out"
+            chunk_in_dir.mkdir(parents=True, exist_ok=True)
+
+            # Symlink (or copy) the window frames into a temporary input dir
+            for seq_i, src_frame in enumerate(window_frames):
+                dst = chunk_in_dir / f"{seq_i:08d}.png"
+                if dst.exists() or dst.is_symlink():
+                    dst.unlink()
+                dst.symlink_to(src_frame.resolve())
+
+            print(
+                f"[inference] Chunk {chunk_n + 1}/{len(chunk_starts)}: "
+                f"frames {lo}–{hi - 1} (window={len(window_frames)})"
+            )
+            _run_inference_chunk(chunk_in_dir, chunk_out_dir, config, checkpoint, env)
+
+            # Collect only the non-overlap output frames that belong to this chunk
+            out_frames = sorted(chunk_out_dir.glob(FRAME_GLOB))
+            # How many overlap frames were prepended / appended?
+            pre_skip  = start - lo   # frames to skip at the start (left overlap)
+            post_skip = hi - end     # frames to skip at the end  (right overlap)
+            keep_frames_list = out_frames[
+                pre_skip : len(out_frames) - post_skip if post_skip else None
+            ]
+
+            for frame in keep_frames_list:
+                dst = upscaled_dir / f"{output_idx:08d}.png"
+                shutil.copy2(frame, dst)
+                output_idx += 1
+
+    finally:
+        shutil.rmtree(tmp_chunks_root, ignore_errors=True)
+
+    print(f"[inference] {output_idx} upscaled frames → {upscaled_dir}")
 
 
 def assemble_video(
@@ -308,10 +464,24 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--max-seq-len",
-        type=int,
-        default=DEFAULT_MAX_SEQ_LEN,
+        default=_AUTO,
         dest="max_seq_len",
-        help="Max frames per inference batch. Reduce on low-VRAM GPUs.",
+        help=(
+            "Max frames per inference batch. "
+            "'auto' (default) detects a safe value from available VRAM. "
+            "Pass an integer (e.g. 8) to override on low-VRAM GPUs."
+        ),
+    )
+    parser.add_argument(
+        "--chunk-overlap",
+        type=int,
+        default=3,
+        dest="chunk_overlap",
+        help=(
+            "Extra frames borrowed from neighbouring chunks at each boundary "
+            "to preserve temporal context across seams. "
+            "Recommended: 2-5. Set 0 to disable (default: 3)."
+        ),
     )
     parser.add_argument(
         "--scale",
@@ -331,6 +501,14 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Custom directory for temp frames. Defaults to a system temp dir.",
     )
+    parser.add_argument(
+        "--device",
+        default="cuda:0",
+        help=(
+            "Device for inference: 'cuda:0' (default), 'cuda:1' (second GPU), "
+            "or 'cpu' (no GPU)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -339,22 +517,34 @@ def upscale_video(
     output_path: str | Path,
     config: str | Path | None = None,
     checkpoint: str | Path | None = None,
-    max_seq_len: int = DEFAULT_MAX_SEQ_LEN,
+    max_seq_len: int | str = _AUTO,
     scale: int = DEFAULT_SCALE,
     keep_frames: bool = False,
     work_dir: str | Path | None = None,
+    device: str = "cuda:0",
+    chunk_overlap: int = 3,
 ) -> Path:
     """Upscale a single video using RealBasicVSR + ffmpeg.
 
     Args:
-        input_path:   Path to the source video file.
-        output_path:  Path for the upscaled output video.
-        config:       RealBasicVSR config (.py). Defaults to the vendor x4 config.
-        checkpoint:   Model checkpoint (.pth). Defaults to checkpoints/RealBasicVSR_x4.pth.
-        max_seq_len:  Max frames per inference batch. Reduce on low-VRAM GPUs (e.g. 8).
-        scale:        Expected upscale factor — used only for the verification summary.
-        keep_frames:  If True, extracted and upscaled frame dirs are not deleted.
-        work_dir:     Custom directory for temp frames. Defaults to a system temp dir.
+        input_path:    Path to the source video file.
+        output_path:   Path for the upscaled output video.
+        config:        RealBasicVSR config (.py). Defaults to the vendor x4 config.
+        checkpoint:    Model checkpoint (.pth). Defaults to checkpoints/RealBasicVSR_x4.pth.
+        max_seq_len:   Max frames per forward pass — primary VRAM control lever.
+                         "auto"  — detect safe value from available VRAM (default)
+                         int     — explicit frame count (e.g. 8 for 8 GB GPU)
+        scale:         Expected upscale factor — used only for the verification summary.
+        keep_frames:   If True, extracted and upscaled frame dirs are not deleted.
+        work_dir:      Custom directory for temp frames. Defaults to a system temp dir.
+        device:        Which device to run inference on.
+                         "cuda:0"  — first GPU (default)
+                         "cuda:1"  — second GPU (multi-GPU machines)
+                         "cpu"     — disable GPU entirely (slow, always works)
+        chunk_overlap: Extra frames borrowed from neighbouring chunks at each boundary
+                       so the model has temporal context across seams. The overlap
+                       frames are discarded from the output (frame count unchanged).
+                       Recommended: 2–5. Set to 0 to disable (original behaviour).
 
     Returns:
         Path to the finished output video.
@@ -367,19 +557,29 @@ def upscale_video(
     config = str(config) if config else str(DEFAULT_CONFIG)
     checkpoint = str(checkpoint) if checkpoint else str(DEFAULT_CHECKPOINT)
 
-    print("=" * 60)
-    print("  RealBasicVSR + FFmpeg Upscaling Pipeline")
-    print("=" * 60)
-    print(f"  Input      : {input_path}")
-    print(f"  Output     : {output_path}")
-    print(f"  Config     : {config}")
-    print(f"  Checkpoint : {checkpoint}")
-    print(f"  MaxSeqLen  : {max_seq_len}")
-    print("=" * 60)
-
     preflight(input_path, output_path, config, checkpoint)
 
     meta = probe_video(input_path)
+
+    # Resolve "auto" → concrete int now that we know the frame resolution
+    if max_seq_len == _AUTO:
+        resolved_seq_len = auto_max_seq_len(meta["width"], meta["height"], device)
+    else:
+        resolved_seq_len = int(max_seq_len)
+
+    print("=" * 60)
+    print("  RealBasicVSR + FFmpeg Upscaling Pipeline")
+    print("=" * 60)
+    print(f"  Input        : {input_path}")
+    print(f"  Output       : {output_path}")
+    print(f"  Config       : {config}")
+    print(f"  Checkpoint   : {checkpoint}")
+    print(f"  MaxSeqLen    : {resolved_seq_len}"
+          + (" (auto)" if max_seq_len == _AUTO else ""))
+    print(f"  ChunkOverlap : {chunk_overlap}")
+    print(f"  Device       : {device}")
+    print("=" * 60)
+
     print(f"\n[probe] Source: {meta['width']}×{meta['height']} @ "
           f"{meta['fps']:.3f} fps, audio={meta['has_audio']}")
 
@@ -404,7 +604,9 @@ def upscale_video(
             upscaled_dir=upscaled_dir,
             config=config,
             checkpoint=checkpoint,
-            max_seq_len=max_seq_len,
+            max_seq_len=resolved_seq_len,
+            device=device,
+            chunk_overlap=chunk_overlap,
         )
 
         print("\n── Stage 3/3: Assemble output video ────────────────────────")
@@ -433,15 +635,21 @@ def upscale_video(
 def main() -> None:
     args = parse_args()
     try:
+        # CLI passes max_seq_len as a string; convert to int unless it's "auto"
+        msl = args.max_seq_len
+        if msl != _AUTO:
+            msl = int(msl)
         upscale_video(
             input_path=args.input,
             output_path=args.output,
             config=args.config,
             checkpoint=args.checkpoint,
-            max_seq_len=args.max_seq_len,
+            max_seq_len=msl,
             scale=args.scale,
             keep_frames=args.keep_frames,
             work_dir=args.work_dir,
+            device=args.device,
+            chunk_overlap=args.chunk_overlap,
         )
     except RuntimeError as exc:
         sys.exit(str(exc))
