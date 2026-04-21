@@ -1,0 +1,7 @@
+# Orchestration-layer dependencies.
+# RealBasicVSR's own dependencies (torch, mmcv, mmedit) are installed
+# by scripts/setup_realbasicvsr.sh using mim.
+
+# Nothing extra needed at the moment beyond the standard library;
+# numpy and torch come via the mmedit install chain.
+# Add project-specific packages below if needed in future.

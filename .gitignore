@@ -205,3 +205,14 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# video-upscaling project
+vendor/                      # cloned by scripts/setup_realbasicvsr.sh
+checkpoints/                 # large model weights — not committed
+workspace/                   # local working directories for frame extraction
+realbasicvsr_configs         # symlink created by setup script
+*.pth                        # PyTorch checkpoints
+*.mp4                        # video files (inputs/outputs)
+*.mov
+*.avi
+*.mkv
