@@ -62,7 +62,7 @@ bash scripts/setup_realbasicvsr.sh
 
 ### 3. Download the pretrained checkpoint
 
-Run the download script — it tries Dropbox first (no auth), then falls back to Google Drive via `gdown`:
+Run the download script — it tries Google Drive first via `gdown`, then falls back to Dropbox:
 
 ```bash
 bash scripts/download_weights.sh

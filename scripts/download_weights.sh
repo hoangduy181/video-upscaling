@@ -58,9 +58,9 @@ download_gdrive() {
 info "Target: $CKPT_FILE"
 echo ""
 
-if download_dropbox; then
+if download_gdrive; then
   : # success
-elif download_gdrive; then
+elif download_dropbox; then
   : # success
 else
   error "All download sources failed."
