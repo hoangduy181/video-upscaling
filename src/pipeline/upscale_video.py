@@ -129,10 +129,11 @@ def auto_max_seq_len(width: int, height: int, device: str = "cuda:0") -> int:
         return 8
 
     gpu_idx = int(device.split(":")[1]) if ":" in device else 0
-    props = torch.cuda.get_device_properties(gpu_idx)
-    total_vram = props.total_memory          # bytes
-    used_vram  = torch.cuda.memory_allocated(gpu_idx)
-    free_vram  = total_vram - used_vram
+
+    # mem_get_info returns driver-level (free, total) — accounts for ALL processes,
+    # not just this Python process. Using memory_allocated() here would silently
+    # ignore VRAM held by other inference workers and produce a dangerously high estimate.
+    free_vram, total_vram = torch.cuda.mem_get_info(gpu_idx)
 
     headroom   = 1.5 * 1024 ** 3            # reserve 1.5 GB
     usable     = max(0.0, free_vram - headroom)
@@ -143,12 +144,13 @@ def auto_max_seq_len(width: int, height: int, device: str = "cuda:0") -> int:
     if bytes_per_frame == 0:
         return 30
 
-    estimated = max(1, min(120, int(usable / bytes_per_frame)))
+    estimated  = max(1, min(120, int(usable / bytes_per_frame)))
     total_gb   = total_vram / 1024 ** 3
     free_gb    = free_vram  / 1024 ** 3
+    used_gb    = total_gb - free_gb
     print(
-        f"[auto] VRAM: {total_gb:.1f} GB total, {free_gb:.1f} GB free → "
-        f"max_seq_len={estimated}"
+        f"[auto] VRAM: {total_gb:.1f} GB total, {used_gb:.1f} GB used by all processes, "
+        f"{free_gb:.1f} GB free → max_seq_len={estimated}"
     )
     return estimated
 
@@ -250,6 +252,8 @@ def _build_inference_env(device: str) -> dict:
         f"{VENDOR_RB_DIR}{os.pathsep}{existing_pp}" if existing_pp
         else str(VENDOR_RB_DIR)
     )
+    # Reduces CUDA OOM caused by allocator fragmentation — safe for all workloads.
+    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     if device.startswith("cuda:"):
         gpu_idx = device.split(":")[1]
         env["CUDA_VISIBLE_DEVICES"] = gpu_idx
@@ -266,17 +270,51 @@ def _run_inference_chunk(
     config: str,
     checkpoint: str,
     env: dict,
+    *,
+    max_retries: int = 3,
 ) -> None:
-    """Run the RealBasicVSR inference script on one chunk directory."""
-    chunk_out_dir.mkdir(parents=True, exist_ok=True)
-    run([
-        "python", str(INFERENCE_SCRIPT),
-        config,
-        checkpoint,
-        str(chunk_frames_dir),
-        str(chunk_out_dir),
-        "--is_save_as_png=True",
-    ], env=env)
+    """Run the RealBasicVSR inference script on one chunk directory.
+
+    On failure the chunk is bisected (max_seq_len halved) and retried up to
+    *max_retries* times so a transient CUDA OOM does not abort the whole job.
+    """
+    frame_count = len(list(chunk_frames_dir.glob(FRAME_GLOB)))
+    # None → inference script processes everything in one shot (fastest path).
+    current_max_seq: int | None = None
+
+    for attempt in range(max_retries + 1):
+        chunk_out_dir.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            "python", str(INFERENCE_SCRIPT),
+            config,
+            checkpoint,
+            str(chunk_frames_dir),
+            str(chunk_out_dir),
+            "--is_save_as_png=True",
+        ]
+        if current_max_seq is not None:
+            cmd.append(f"--max_seq_len={current_max_seq}")
+
+        result = run(cmd, env=env, check=False)
+        if result.returncode == 0:
+            return
+
+        if attempt == max_retries:
+            raise RuntimeError(
+                f"[error] Inference chunk failed after {max_retries} retries "
+                f"(exit code {result.returncode}):\n  {' '.join(str(c) for c in cmd)}"
+            )
+
+        next_seq = max(1, (current_max_seq if current_max_seq is not None else frame_count) // 2)
+        print(
+            f"[inference] Chunk failed (exit {result.returncode}), "
+            f"retrying with max_seq_len={next_seq} "
+            f"(attempt {attempt + 1}/{max_retries})..."
+        )
+        current_max_seq = next_seq
+        # Clear stale output before retry so partial results don't leak through.
+        shutil.rmtree(chunk_out_dir, ignore_errors=True)
 
 
 def run_inference(

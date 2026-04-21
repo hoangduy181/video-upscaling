@@ -41,7 +41,7 @@ if [ -d "$RB_DIR/.git" ]; then
   git -C "$RB_DIR" pull --ff-only
 else
   info "Cloning RealBasicVSR into $RB_DIR ..."
-  git clone https://github.com/ckkelvinchan/RealBasicVSR.git "$RB_DIR"
+  git clone https://github.com/hoangduy181/RealBasicVSR.git "$RB_DIR"
 fi
 
 # ── PyTorch (must come before mmcv-full so mim can detect torch+cuda version) ─
