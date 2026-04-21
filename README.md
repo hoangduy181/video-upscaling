@@ -71,7 +71,7 @@ bash scripts/download_weights.sh
 Or download manually from any of these mirrors and save to `checkpoints/RealBasicVSR_x4.pth`:
 
 - [Dropbox](https://www.dropbox.com/s/eufigwhejgd8bnt/RealBasicVSR_x4.pth)
-- [Google Drive](https://drive.google.com/file/d/1OYR1J2GXE3-bCBcIDBkTa3eAiKFjqFD6/view)
+- [Google Drive](https://drive.google.com/file/d/1OYR1J2GXE90Zu2gVU5xc0t0P_UmKH7ID/view)
 - [OneDrive](https://entuedu-my.sharepoint.com/:u:/g/personal/chan0899_e_ntu_edu_sg/EVlhWlqBVuxOhjeSqLN9N4UBSbQ5Z-PvYFm2AO5kAGxJSg)
 
 ```bash
