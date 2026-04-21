@@ -67,7 +67,7 @@ def run(cmd: list[str], *, check: bool = True, **kwargs) -> subprocess.Completed
     print(f"\n[cmd] {' '.join(str(c) for c in cmd)}\n")
     result = subprocess.run(cmd, **kwargs)
     if check and result.returncode != 0:
-        sys.exit(f"[error] Command failed with exit code {result.returncode}")
+        raise RuntimeError(f"[error] Command failed with exit code {result.returncode}:\n  {' '.join(str(c) for c in cmd)}")
     return result
 
 
@@ -87,7 +87,7 @@ def probe_video(path: Path) -> dict:
     audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
 
     if video_stream is None:
-        sys.exit(f"[error] No video stream found in {path}")
+        raise RuntimeError(f"[error] No video stream found in {path}")
 
     # Parse fractional fps string like "25/1" or "30000/1001"
     fps_str = video_stream.get("r_frame_rate", "25/1")
@@ -148,6 +148,19 @@ def preflight(
             f"  Run scripts/setup_realbasicvsr.sh first."
         )
 
+    # Check that mmedit is importable in the subprocess Python environment
+    python_bin = shutil.which("python") or "python"
+    mmedit_check = subprocess.run(
+        [python_bin, "-c", "import mmedit"],
+        capture_output=True,
+    )
+    if mmedit_check.returncode != 0:
+        errors.append(
+            "Python package 'mmedit' is not installed.\n"
+            "  Fix: pip install mmedit\n"
+            "  Or re-run: bash scripts/setup_realbasicvsr.sh"
+        )
+
     output_parent = output_path.parent
     if not output_parent.exists():
         try:
@@ -172,8 +185,7 @@ def extract_frames(video: Path, frames_dir: Path, fps: float) -> int:
     run([
         "ffmpeg", "-y",
         "-i", str(video),
-        "-vsync", "0",          # pass-through — no frame duplication
-        "-frame_pts", "true",
+        "-fps_mode", "passthrough",   # no frame duplication or dropping
         str(frames_dir / FRAME_PATTERN),
     ])
     count = len(list(frames_dir.glob(FRAME_GLOB)))

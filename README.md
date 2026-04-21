@@ -57,6 +57,7 @@ This script clones the official RealBasicVSR repo into `vendor/`, installs all P
 ```bash
 bash scripts/setup_realbasicvsr.sh
 ```
+```
 
 > If you use a conda environment, activate it **before** running the script so that `pip` and `mim` install into the right env.
 
